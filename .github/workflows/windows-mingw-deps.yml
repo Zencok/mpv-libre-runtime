@@ -1,0 +1,104 @@
+# Plan B: build/push prebuilt MinGW dependency image to GHCR.
+# Self-contained Dockerfile.deps (tools + deps in one Buildx graph) — no host load.
+
+name: Windows MinGW deps image
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      image:
+        description: Fully-qualified deps image reference
+        value: ${{ jobs.deps.outputs.image }}
+
+concurrency:
+  group: windows-mingw-deps-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve image name and builder pins
+        id: meta
+        shell: bash
+        run: |
+          IMAGE=$(node scripts/windows-deps-image.mjs)
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "builder_repo=$(node -p "require('./versions.lock.json').sources.builder.repository")" >> "$GITHUB_OUTPUT"
+          echo "builder_commit=$(node -p "require('./versions.lock.json').sources.builder.commit")" >> "$GITHUB_OUTPUT"
+          echo "jobs=$(nproc)" >> "$GITHUB_OUTPUT"
+          echo "Resolved deps image: $IMAGE"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check remote image
+        id: remote
+        shell: bash
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image already published: $IMAGE"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Image missing, will build: $IMAGE"
+          fi
+
+      - name: Build and push deps image
+        if: steps.remote.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: build/windows-x64
+          file: build/windows-x64/Dockerfile.deps
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.image }}
+          build-args: |
+            BUILDER_REPOSITORY=${{ steps.meta.outputs.builder_repo }}
+            BUILDER_COMMIT=${{ steps.meta.outputs.builder_commit }}
+            MAKEJOBS=${{ steps.meta.outputs.jobs }}
+            MPV_COMMIT=0000000000000000000000000000000000000001
+            LIBREMPEG_COMMIT=0000000000000000000000000000000000000001
+          cache-from: type=gha,scope=win-mingw-deps
+          cache-to: type=gha,mode=max,scope=win-mingw-deps
+
+      - name: Make package public (best effort)
+        if: steps.remote.outputs.exists != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          PKG="mpv-libre-mingw-deps"
+          if gh api "user/packages/container/${PKG}" >/dev/null 2>&1; then
+            gh api --method PATCH "user/packages/container/${PKG}" -f visibility=public || true
+          fi
+          if gh api "orgs/${OWNER}/packages/container/${PKG}" >/dev/null 2>&1; then
+            gh api --method PATCH "orgs/${OWNER}/packages/container/${PKG}" -f visibility=public || true
+          fi
+          echo "Requested public visibility for ${PKG}"

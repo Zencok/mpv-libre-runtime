@@ -1,0 +1,22 @@
+{
+  "name": "mpv-libre-runtime-build",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible libmpv runtimes built on LibreMPEG",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:unix": "node scripts/build-unix.mjs",
+    "build:windows-x64": "node scripts/build-windows-x64.mjs",
+    "build:windows-x64:release": "node scripts/build-windows-x64.mjs --source-bundle",
+    "build:windows-x64:deps-image": "node scripts/build-windows-x64.mjs --deps-image",
+    "build:windows-x64:full": "node scripts/build-windows-x64.mjs --full",
+    "windows:deps-image-name": "node scripts/windows-deps-image.mjs",
+    "check": "node scripts/check-repository.mjs",
+    "check:upstream": "node scripts/update-upstreams.mjs",
+    "manifest": "node scripts/create-release-manifest.mjs"
+  }
+}

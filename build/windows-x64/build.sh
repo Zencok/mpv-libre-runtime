@@ -1,0 +1,293 @@
+#!/bin/sh
+# Windows cross-build entrypoint.
+# BUILD_MODE:
+#   full    — llvm + all deps + librempeg + mpv (cold path / local default)
+#   deps    — llvm + codec/UI deps only (GHCR deps image)
+#   runtime — librempeg + mpv only (expects deps already present under /build)
+set -eu
+
+: "${BUILDER_REPOSITORY:?BUILDER_REPOSITORY is required}"
+: "${BUILDER_COMMIT:?BUILDER_COMMIT is required}"
+: "${MPV_REPOSITORY:?MPV_REPOSITORY is required}"
+: "${MPV_COMMIT:?MPV_COMMIT is required}"
+: "${LIBREMPEG_REPOSITORY:?LIBREMPEG_REPOSITORY is required}"
+: "${LIBREMPEG_COMMIT:?LIBREMPEG_COMMIT is required}"
+: "${RUNTIME_VERSION:?RUNTIME_VERSION is required}"
+
+BUILD_MODE=${BUILD_MODE:-full}
+case "${BUILD_MODE}" in
+    full|deps|runtime) ;;
+    *) echo "Unsupported BUILD_MODE=${BUILD_MODE}" >&2; exit 2 ;;
+esac
+
+SOURCE_ROOT=/build/mingw-cmake-env
+BUILD_ROOT=/build/output
+RUNTIME_ROOT="${BUILD_ROOT}/packages/mpv-runtime"
+OUTPUT_ROOT=/workspace/artifacts
+PACKAGE_SRC=/workspace/build/windows-x64/packages
+ARCHIVE_NAME=mpv-libre-runtime-win32-x64.7z
+SOURCE_ARCHIVE_NAME=mpv-libre-runtime-sources.tar.xz
+# Prefer a dedicated /ccache mount so host volumes for /build do not hide it.
+CCACHE_DIR=${CCACHE_DIR:-/ccache}
+export CCACHE_DIR
+export CCACHE_CONFIGPATH=${CCACHE_CONFIGPATH:-/etc/ccache.conf}
+
+# Prefer explicit MAKEJOBS; otherwise use available CPUs (cap at 16 for RAM).
+if [ -z "${MAKEJOBS:-}" ] || [ "${MAKEJOBS}" = "0" ]; then
+    if command -v nproc >/dev/null 2>&1; then
+        MAKEJOBS=$(nproc)
+    else
+        MAKEJOBS=4
+    fi
+fi
+if [ "${MAKEJOBS}" -gt 16 ]; then
+    MAKEJOBS=16
+fi
+export MAKEJOBS
+
+mkdir -p "${CCACHE_DIR}" "${BUILD_ROOT}" "${OUTPUT_ROOT}"
+
+log() {
+    printf '==> %s\n' "$*"
+}
+
+ccache_stats() {
+    if command -v ccache >/dev/null 2>&1; then
+        log "ccache stats"
+        ccache --show-stats 2>/dev/null || true
+        ccache --print-stats 2>/dev/null || true
+    fi
+}
+
+prepare_builder() {
+    if [ -d "${SOURCE_ROOT}/.git" ]; then
+        log "updating mingw-cmake-env checkout to ${BUILDER_COMMIT}"
+        git -C "${SOURCE_ROOT}" fetch --depth=1 origin "${BUILDER_COMMIT}"
+        git -C "${SOURCE_ROOT}" checkout --detach --force "${BUILDER_COMMIT}" 2>/dev/null \
+            || git -C "${SOURCE_ROOT}" reset --hard "${BUILDER_COMMIT}"
+    elif [ -d "${SOURCE_ROOT}" ]; then
+        # Deps image strips .git to shrink layers; tree must already match pin.
+        log "using vendored mingw-cmake-env tree (no .git) at ${SOURCE_ROOT}"
+        if [ -f "${SOURCE_ROOT}/.builder-commit" ]; then
+            pinned=$(cat "${SOURCE_ROOT}/.builder-commit")
+            if [ "${pinned}" != "${BUILDER_COMMIT}" ]; then
+                echo "Vendored builder commit ${pinned} != required ${BUILDER_COMMIT}" >&2
+                echo "Rebuild the MinGW deps image for this builder pin." >&2
+                exit 1
+            fi
+        else
+            log "warning: no .builder-commit pin file; assuming tree matches ${BUILDER_COMMIT}"
+        fi
+    else
+        log "cloning mingw-cmake-env"
+        git clone --filter=blob:none "${BUILDER_REPOSITORY}" "${SOURCE_ROOT}"
+        git -C "${SOURCE_ROOT}" fetch --depth=1 origin "${BUILDER_COMMIT}"
+        git -C "${SOURCE_ROOT}" checkout --detach --force "${BUILDER_COMMIT}" 2>/dev/null \
+            || git -C "${SOURCE_ROOT}" reset --hard "${BUILDER_COMMIT}"
+    fi
+    mkdir -p "${SOURCE_ROOT}/packages"
+    cp "${PACKAGE_SRC}/librempeg.cmake" "${SOURCE_ROOT}/packages/librempeg.cmake"
+    cp "${PACKAGE_SRC}/mpv.cmake" "${SOURCE_ROOT}/packages/mpv.cmake"
+}
+
+# Parse DEPENDS= lists from our package recipes (excludes librempeg/mpv themselves).
+load_deps_targets() {
+    DEPS_TARGETS=$(
+        awk '
+            BEGIN { dep = 0 }
+            $1 == "DEPENDS" {
+                dep = 1
+                for (i = 2; i <= NF; i++) emit($i)
+                next
+            }
+            dep {
+                if ($0 ~ /GIT_REPOSITORY|UPDATE_COMMAND|CONFIGURE_COMMAND|CMAKE_ARGS|BUILD_COMMAND|INSTALL_COMMAND|LOG_|DOWNLOAD_|PATCH_|SOURCE_SUBDIR|URL |URL_HASH|BINARY_DIR|SOURCE_DIR/) {
+                    dep = 0
+                    next
+                }
+                for (i = 1; i <= NF; i++) emit($i)
+            }
+            function emit(tok) {
+                gsub(/[^A-Za-z0-9_-]/, "", tok)
+                if (tok == "" || tok == "DEPENDS") return
+                if (tok == "librempeg" || tok == "mpv") return
+                print tok
+            }
+        ' "${PACKAGE_SRC}/librempeg.cmake" "${PACKAGE_SRC}/mpv.cmake" \
+        | sort -u
+    )
+    if [ -z "${DEPS_TARGETS}" ]; then
+        echo "Failed to parse DEPENDS targets from package cmake files" >&2
+        exit 1
+    fi
+    log "dep targets: $(echo "${DEPS_TARGETS}" | tr '\n' ' ')"
+}
+
+configure_tree() {
+    log "cmake configure (${BUILD_MODE}) jobs=${MAKEJOBS}"
+    cmake -S "${SOURCE_ROOT}" -B "${BUILD_ROOT}" -G Ninja \
+        -DCPUTUNE=x86-64 \
+        -DMAKEJOBS="${MAKEJOBS}"
+}
+
+fix_harfbuzz_if_needed() {
+    HARFBUZZ_PREFIX="${BUILD_ROOT}/packages/harfbuzz-prefix/src"
+    if grep -q '"full": "1\.8\.' \
+        "${HARFBUZZ_PREFIX}/harfbuzz-build/meson-info/meson-info.json" 2>/dev/null; then
+        log "resetting incompatible harfbuzz build tree"
+        rm -rf "${HARFBUZZ_PREFIX}/harfbuzz-build"
+        rm -f \
+            "${HARFBUZZ_PREFIX}/harfbuzz-stamp/harfbuzz-force-meson-configure" \
+            "${HARFBUZZ_PREFIX}/harfbuzz-stamp/harfbuzz-configure" \
+            "${HARFBUZZ_PREFIX}/harfbuzz-stamp/harfbuzz-build" \
+            "${HARFBUZZ_PREFIX}/harfbuzz-stamp/harfbuzz-install"
+    fi
+}
+
+build_llvm() {
+    log "building llvm toolchain target"
+    cmake --build "${BUILD_ROOT}" --target llvm --parallel "${MAKEJOBS}"
+}
+
+build_deps() {
+    load_deps_targets
+    log "building MinGW dependency targets"
+    set --
+    # shellcheck disable=SC2086
+    for target in ${DEPS_TARGETS}; do
+        set -- "$@" --target "${target}"
+    done
+    # shellcheck disable=SC2068
+    cmake --build "${BUILD_ROOT}" --parallel "${MAKEJOBS}" $@
+}
+
+invalidate_runtime_packages() {
+    # Force ExternalProject to rebuild when pins change; leave other deps intact.
+    rm -rf \
+        "${BUILD_ROOT}/packages/librempeg-prefix" \
+        "${BUILD_ROOT}/packages/mpv-prefix" \
+        "${BUILD_ROOT}/packages/librempeg-stamp" \
+        "${BUILD_ROOT}/packages/mpv-stamp" \
+        "${BUILD_ROOT}/packages/mpv-runtime"
+}
+
+slim_deps_tree() {
+    log "slimming /build for image payload"
+    # Drop VCS metadata everywhere under /build.
+    find /build -type d -name .git 2>/dev/null | while read -r gitdir; do
+        rm -rf "${gitdir}"
+    done
+    # Drop package download caches only (do NOT delete installed *.exe tools).
+    find "${BUILD_ROOT}" -type d \( \
+        -name download -o -name downloads -o -name '.cache' -o -name tmp \
+    \) 2>/dev/null | while read -r d; do
+        rm -rf "${d}"
+    done
+    find "${BUILD_ROOT}" -type f \( \
+        -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o \
+        -name '*.tar.xz' -o -name '*.tar.bz2' -o -name '*.zip' -o -name '*.7z' \
+    \) -delete 2>/dev/null || true
+    # Intermediate objects only under package build dirs (keep install prefixes intact).
+    find "${BUILD_ROOT}/packages" -type d \( -name '*-build' -o -name 'src' \) 2>/dev/null \
+        | while read -r d; do
+            find "${d}" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.lo' -o -name '*.a' \) \
+                ! -path '*/install/*' -delete 2>/dev/null || true
+        done
+    find "${BUILD_ROOT}" -type f \( -name 'CMakeOutput.log' -o -name 'CMakeError.log' \) \
+        -delete 2>/dev/null || true
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -M 1.5G 2>/dev/null || true
+        ccache --cleanup 2>/dev/null || true
+    fi
+    du -sh /build "${CCACHE_DIR}" 2>/dev/null || true
+}
+
+build_runtime_packages() {
+    log "building librempeg + mpv"
+    invalidate_runtime_packages
+    cmake --build "${BUILD_ROOT}" --target librempeg --parallel "${MAKEJOBS}"
+    cmake --build "${BUILD_ROOT}" --target mpv --parallel "${MAKEJOBS}"
+}
+
+package_runtime() {
+    test -s "${RUNTIME_ROOT}/libmpv-2.dll"
+    test -s "${RUNTIME_ROOT}/ffmpeg.exe"
+    test -s "${RUNTIME_ROOT}/ffprobe.exe"
+    rm -rf "${RUNTIME_ROOT}/include"
+    rm -f "${RUNTIME_ROOT}/libmpv.dll.a"
+    mkdir -p "${RUNTIME_ROOT}/licenses/librempeg" "${OUTPUT_ROOT}"
+    cp "${BUILD_ROOT}/packages/librempeg-prefix/src/librempeg/COPYING.AGPLv3" \
+        "${RUNTIME_ROOT}/licenses/librempeg/COPYING.AGPLv3"
+    cp "${BUILD_ROOT}/packages/librempeg-prefix/src/librempeg/COPYING.GPLv3" \
+        "${RUNTIME_ROOT}/licenses/librempeg/COPYING.GPLv3"
+    cp "${BUILD_ROOT}/packages/librempeg-prefix/src/librempeg/LICENSE.md" \
+        "${RUNTIME_ROOT}/licenses/librempeg/LICENSE.md"
+    cp /workspace/NOTICE.md "${RUNTIME_ROOT}/NOTICE.md"
+    cat > "${RUNTIME_ROOT}/runtime.json" <<EOF
+{
+  "schemaVersion": 1,
+  "name": "mpv-libre-runtime",
+  "version": "${RUNTIME_VERSION}",
+  "engine": "libmpv",
+  "mediaBackend": "librempeg",
+  "license": "AGPL-3.0-or-later",
+  "decoders": ["ac4"],
+  "platform": "win32-x64",
+  "sourceCommits": {
+    "builder": "${BUILDER_COMMIT}",
+    "mpv": "${MPV_COMMIT}",
+    "librempeg": "${LIBREMPEG_COMMIT}"
+  }
+}
+EOF
+
+    rm -f "${OUTPUT_ROOT}/${ARCHIVE_NAME}"
+    (
+        cd "${RUNTIME_ROOT}"
+        # -mx=5 is far cheaper than -mx=9 with negligible size impact for CI.
+        7z a -t7z -mx=5 -mmt=on -mtm=off -mta=off -mtc=off \
+            "${OUTPUT_ROOT}/${ARCHIVE_NAME}" .
+    )
+
+    if [ "${CREATE_SOURCE_BUNDLE:-0}" = "1" ]; then
+        sh /workspace/build/windows-x64/collect-sources.sh \
+            "${SOURCE_ROOT}" \
+            "${BUILD_ROOT}" \
+            "${OUTPUT_ROOT}/${SOURCE_ARCHIVE_NAME}"
+    fi
+}
+
+log "Windows build mode=${BUILD_MODE} jobs=${MAKEJOBS}"
+ccache_stats
+prepare_builder
+fix_harfbuzz_if_needed
+
+# Always reconfigure after copying package recipes and applying runtime env pins.
+# The deps image is configured with dummy MPV/LIBREMPEG commits; ExternalProject
+# expands $ENV{…} at configure time, so skipping cmake here would keep fake GIT_TAGs.
+configure_tree
+
+case "${BUILD_MODE}" in
+    deps)
+        build_llvm
+        build_deps
+        invalidate_runtime_packages
+        printf '%s\n' "${BUILDER_COMMIT}" > "${SOURCE_ROOT}/.builder-commit"
+        slim_deps_tree
+        log "deps image payload ready under /build"
+        ;;
+    runtime)
+        # llvm + deps install prefixes come from the GHCR image; only rebuild runtime pkgs.
+        build_runtime_packages
+        package_runtime
+        ;;
+    full)
+        build_llvm
+        build_deps
+        build_runtime_packages
+        package_runtime
+        ;;
+esac
+
+ccache_stats
+log "done (${BUILD_MODE})"

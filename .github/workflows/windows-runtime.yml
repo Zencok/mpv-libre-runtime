@@ -1,0 +1,130 @@
+# Shared Windows runtime build: GHCR deps image (Plan B) + ccache (Plan A).
+
+name: Windows runtime
+
+on:
+  workflow_call:
+    inputs:
+      source_bundle:
+        description: Build corresponding source archive
+        type: boolean
+        default: false
+
+jobs:
+  mingw-deps:
+    uses: ./.github/workflows/windows-mingw-deps.yml
+    permissions:
+      contents: read
+      packages: write
+
+  build:
+    needs: mingw-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve cache keys
+        id: keys
+        shell: bash
+        run: |
+          IMAGE=$(node scripts/windows-deps-image.mjs)
+          PROFILE=$(node -e "
+            const c=require('crypto'),f=require('fs');
+            const h=c.createHash('sha256');
+            for (const p of [
+              'build/windows-x64/build.sh',
+              'build/windows-x64/packages/librempeg.cmake',
+              'build/windows-x64/packages/mpv.cmake',
+              'versions.lock.json',
+            ]) h.update(f.readFileSync(p));
+            process.stdout.write(h.digest('hex').slice(0,20));
+          ")
+          echo "ccache_key=win-ccache-${PROFILE}" >> "$GITHUB_OUTPUT"
+          echo "deps_image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "deps image: ${IMAGE}"
+          echo "ccache key: win-ccache-${PROFILE}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/windows-ccache
+          key: ${{ steps.keys.outputs.ccache_key }}
+          restore-keys: |
+            win-ccache-
+
+      - name: Report ccache restore
+        shell: bash
+        run: |
+          mkdir -p .cache/windows-ccache
+          echo "cache-hit=${{ steps.ccache-restore.outputs.cache-hit }}"
+          du -sh .cache/windows-ccache || true
+
+      - name: Build Windows x64 runtime
+        env:
+          MPV_LIBRE_DEPS_IMAGE: ${{ needs.mingw-deps.outputs.image }}
+          MPV_LIBRE_CCACHE_VOLUME: ${{ github.workspace }}/.cache/windows-ccache
+          MPV_LIBRE_BUILD_VOLUME: ${{ github.workspace }}/.cache/windows-build
+          MAKEJOBS: "4"
+        run: |
+          # ubuntu-latest is typically 4 vCPU; keep bounded for RAM during MinGW builds.
+          export MAKEJOBS="${MAKEJOBS:-$(nproc)}"
+          if [ "${{ inputs.source_bundle }}" = "true" ]; then
+            npm run build:windows-x64:release
+          else
+            npm run build:windows-x64
+          fi
+
+      - name: Report ccache after build
+        if: always()
+        shell: bash
+        run: |
+          echo "ccache dir size after build:"
+          du -sh .cache/windows-ccache || true
+
+      - name: Save ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/windows-ccache
+          key: ${{ steps.keys.outputs.ccache_key }}
+
+      - name: Upload Windows runtime artifact
+        if: ${{ !inputs.source_bundle }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win32-x64
+          path: |
+            artifacts/mpv-libre-runtime-win32-x64.7z
+            artifacts/mpv-libre-runtime-win32-x64.7z.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows runtime + source artifacts
+        if: ${{ inputs.source_bundle }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win32-x64
+          path: |
+            artifacts/mpv-libre-runtime-win32-x64.7z
+            artifacts/mpv-libre-runtime-win32-x64.7z.sha256
+            artifacts/mpv-libre-runtime-sources.tar.xz
+            artifacts/mpv-libre-runtime-sources.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 7

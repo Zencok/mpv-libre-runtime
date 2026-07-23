@@ -1,0 +1,265 @@
+name: Publish runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - versions.lock.json
+      - build/**
+      - scripts/**
+      - fixtures/**
+      - NOTICE.md
+      - schemas/**
+      - .github/workflows/release.yml
+      - .github/workflows/unix-runtime.yml
+      - .github/workflows/windows-runtime.yml
+      - .github/workflows/windows-mingw-deps.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  packages: write
+
+# Do not cancel an in-flight staged release (Unix may already be published).
+concurrency:
+  group: runtime-release
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    outputs:
+      release-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm run check
+      - name: Select immutable release tag
+        id: tag
+        shell: bash
+        run: |
+          TAG=$(node scripts/select-release-tag.mjs "$GITHUB_SHA")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_TAG=$TAG"
+
+  # Windows builds in parallel with Unix; does not gate the Unix publish.
+  build-windows-x64:
+    needs: contract
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    secrets: inherit
+    uses: ./.github/workflows/windows-runtime.yml
+    with:
+      source_bundle: true
+
+  unix:
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-24.04
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: darwin-arm64
+            os: macos-15
+    uses: ./.github/workflows/unix-runtime.yml
+    with:
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+
+  verify-windows-x64:
+    needs: build-windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-win32-x64
+          path: artifacts
+      - name: Extract runtime
+        shell: pwsh
+        run: 7z x artifacts/mpv-libre-runtime-win32-x64.7z -oruntime
+      - name: Fetch verified AC-4 input
+        run: node scripts/fetch-ac4-fixture.mjs
+      - name: Verify libmpv and AC-4
+        shell: pwsh
+        run: ./scripts/verify-windows-runtime.ps1 -RuntimeDirectory runtime -FixturePath tmp/fixtures/ac4-smoke.mp4
+
+  # Phase 1: publish as soon as all Unix targets are green.
+  release-unix:
+    needs: [contract, unix]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.contract.outputs.release-tag }}
+      RELEASE_PHASE: unix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-linux-*
+          path: artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-darwin-*
+          path: artifacts
+          merge-multiple: true
+      - name: List Unix artifacts
+        shell: bash
+        run: |
+          test -n "$RELEASE_TAG"
+          echo "RELEASE_TAG=$RELEASE_TAG"
+          ls -lah artifacts || true
+          test -f artifacts/mpv-libre-runtime-linux-x64.tar.xz
+          test -f artifacts/mpv-libre-runtime-linux-arm64.tar.xz
+          test -f artifacts/mpv-libre-runtime-darwin-arm64.tar.xz
+          test -f artifacts/mpv-libre-runtime-darwin-x64.tar.xz
+      - name: Create Unix-phase manifest
+        run: node scripts/create-release-manifest.mjs "$RELEASE_TAG"
+      - name: Attest Unix runtime provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/mpv-libre-runtime-*.tar.xz
+      - name: Publish or update Unix release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG"
+          mapfile -t assets < <(
+            find artifacts -maxdepth 1 -type f \
+              ! -name 'RELEASE_NOTES.md' \
+              | sort
+          )
+          test "${#assets[@]}" -ge 4
+          NOTES_FILE=artifacts/RELEASE_NOTES.md
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; uploading Unix assets"
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes-file "$NOTES_FILE"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes-file "$NOTES_FILE" \
+              "${assets[@]}"
+          fi
+          echo "Unix phase published: $RELEASE_TAG"
+
+  # Phase 2: attach Windows independently of Unix success/failure.
+  release-windows:
+    needs: [contract, verify-windows-x64]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.contract.outputs.release-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-win32-x64
+          path: artifacts
+      # Best-effort: include Unix artifacts for a complete manifest when available.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: release-linux-*
+          path: artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: release-darwin-*
+          path: artifacts
+          merge-multiple: true
+      - name: List Windows artifacts
+        shell: bash
+        run: |
+          test -n "$RELEASE_TAG"
+          echo "RELEASE_TAG=$RELEASE_TAG"
+          ls -lah artifacts
+          test -f artifacts/mpv-libre-runtime-win32-x64.7z
+      - name: Create manifest (complete if Unix present, else auto)
+        shell: bash
+        run: |
+          if test -f artifacts/mpv-libre-runtime-linux-x64.tar.xz \
+            && test -f artifacts/mpv-libre-runtime-linux-arm64.tar.xz \
+            && test -f artifacts/mpv-libre-runtime-darwin-arm64.tar.xz \
+            && test -f artifacts/mpv-libre-runtime-darwin-x64.tar.xz; then
+            export RELEASE_PHASE=complete
+          else
+            export RELEASE_PHASE=auto
+          fi
+          echo "Using RELEASE_PHASE=$RELEASE_PHASE"
+          node scripts/create-release-manifest.mjs "$RELEASE_TAG"
+      - name: Attest Windows runtime provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            artifacts/mpv-libre-runtime-win32-x64.7z
+      - name: Attach Windows assets to release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG"
+          mapfile -t assets < <(
+            find artifacts -maxdepth 1 -type f \
+              \( -name 'mpv-libre-runtime-win32-x64*' \
+                 -o -name 'mpv-libre-runtime-sources*' \
+                 -o -name 'runtime-manifest-v1.json*' \) \
+              | sort
+          )
+          test "${#assets[@]}" -ge 2
+          NOTES_FILE=artifacts/RELEASE_NOTES.md
+
+          # If Unix publish is racing create, wait a few minutes for the tag.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for release $RELEASE_TAG to exist..."
+            sleep 30
+          done
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes-file "$NOTES_FILE"
+          else
+            # Unix phase failed or still absent: publish Windows alone.
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes-file "$NOTES_FILE" \
+              "${assets[@]}"
+          fi
+          echo "Windows phase attached: $RELEASE_TAG"

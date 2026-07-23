@@ -1,0 +1,7 @@
+{
+  "url": "https://samples.ffmpeg.org/A-codecs/ac-4/believer.mp4",
+  "sha256": "234a21fc965ddbc6e3a2a53f5eb7e0297eb2600129e74cb420c21f693ee98e8e",
+  "fileName": "ac4-smoke.mp4",
+  "distribution": "Downloaded temporarily for CI verification; not redistributed by this repository."
+}
+

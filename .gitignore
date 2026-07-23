@@ -1,0 +1,6 @@
+artifacts/
+tmp/
+.build/
+.cache/
+.DS_Store
+Thumbs.db

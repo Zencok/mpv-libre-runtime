@@ -1,0 +1,74 @@
+name: Runtime CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: runtime-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm run check
+
+  build-windows-x64:
+    needs: contract
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    secrets: inherit
+    uses: ./.github/workflows/windows-runtime.yml
+    with:
+      source_bundle: false
+
+  unix:
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-24.04
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: darwin-arm64
+            os: macos-15
+    uses: ./.github/workflows/unix-runtime.yml
+    with:
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+
+  verify-windows-x64:
+    needs: build-windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-win32-x64
+          path: artifacts
+      - name: Extract runtime
+        shell: pwsh
+        run: 7z x artifacts/mpv-libre-runtime-win32-x64.7z -oruntime
+      - name: Fetch verified AC-4 input
+        run: node scripts/fetch-ac4-fixture.mjs
+      - name: Verify libmpv and AC-4
+        shell: pwsh
+        run: ./scripts/verify-windows-runtime.ps1 -RuntimeDirectory runtime -FixturePath tmp/fixtures/ac4-smoke.mp4

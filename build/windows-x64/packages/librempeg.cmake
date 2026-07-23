@@ -1,0 +1,114 @@
+if("$ENV{LIBREMPEG_COMMIT}" STREQUAL "")
+  message(FATAL_ERROR "LIBREMPEG_COMMIT is required")
+endif()
+
+ExternalProject_Add(
+  librempeg
+  DEPENDS amf-headers
+          aom
+          bzip2
+          dav1d
+          flac
+          fontconfig
+          harfbuzz
+          lcms2
+          lame
+          libass
+          libjxl
+          libopusenc
+          libplacebo
+          libpng
+          sdl2
+          libvpl
+          libvpx
+          libwebp
+          libxml2
+          libzimg
+          nvcodec-headers
+          rubberband
+          spirv-cross
+          spirv-headers
+          svtav1
+          vorbis
+          vulkan-loader
+          x264
+          x265
+  GIT_REPOSITORY $ENV{LIBREMPEG_REPOSITORY}
+  GIT_TAG $ENV{LIBREMPEG_COMMIT}
+  UPDATE_COMMAND ""
+  CONFIGURE_COMMAND
+    ${EXEC} <SOURCE_DIR>/configure
+    --cc='ccache x86_64-w64-mingw32-gcc' --cxx='ccache x86_64-w64-mingw32-gcc'
+    --cross-prefix=x86_64-w64-mingw32-
+    --prefix=${MINGW_INSTALL_PREFIX}
+    --arch=x86_64
+    --target-os=mingw32
+    --target-exec=wine
+    --pkg-config-flags=--static
+    --disable-debug
+    --disable-decoder=libaom_av1
+    --disable-doc
+    --disable-ffplay
+    --disable-htmlpages
+    --disable-manpages
+    --disable-podpages
+    --disable-txtpages
+    --disable-unstable
+    --disable-vaapi
+    --disable-vdpau
+    --disable-videotoolbox
+    --disable-vulkan
+    --enable-gpl --enable-version3
+    --enable-agpl
+    --enable-amf
+    --enable-cross-compile
+    --enable-ffmpeg
+    --enable-ffprobe
+    --enable-lcms2
+    --enable-libaom
+    --enable-libass
+    --enable-libdav1d
+    --enable-libfontconfig
+    --enable-libharfbuzz
+    --enable-libjxl
+    --enable-libmp3lame
+    --enable-libopus
+    --enable-libplacebo
+    --enable-librubberband
+    --enable-libsvtav1
+    --enable-libvorbis
+    --enable-libvpl
+    --enable-libvpx
+    --enable-libwebp
+    --enable-libx264
+    --enable-libx265
+    --enable-libxml2
+    --enable-libzimg
+    --enable-lto=thin
+    --enable-nvdec
+    --enable-nvenc
+    --enable-runtime-cpudetect
+    --enable-schannel
+    --enable-sdl2
+    "--extra-libs='-lstdc++ -lpthread'"
+  BUILD_COMMAND ${MAKE}
+  INSTALL_COMMAND ${MAKE} install
+  LOG_DOWNLOAD 1
+  LOG_UPDATE 1
+  LOG_CONFIGURE 1
+  LOG_BUILD 1
+  LOG_INSTALL 1)
+
+ExternalProject_Add_Step(
+  librempeg copy-binary
+  DEPENDEES install
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_CURRENT_BINARY_DIR}/librempeg-package
+  COMMAND ${CMAKE_COMMAND} -E copy
+          <BINARY_DIR>/ffmpeg.exe
+          ${CMAKE_CURRENT_BINARY_DIR}/librempeg-package/ffmpeg.exe
+  COMMAND ${CMAKE_COMMAND} -E copy
+          <BINARY_DIR>/ffprobe.exe
+          ${CMAKE_CURRENT_BINARY_DIR}/librempeg-package/ffprobe.exe)
+
+force_rebuild_git(librempeg)

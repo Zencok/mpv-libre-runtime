@@ -1,0 +1,120 @@
+name: Unix runtime target
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      os:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Linux build dependencies
+        if: startsWith(inputs.target, 'linux-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            autoconf automake build-essential g++ git libasound2-dev libgl-dev \
+            libass-dev libfontconfig1-dev libfreetype6-dev libfribidi-dev \
+            libharfbuzz-dev libpulse-dev libunibreak-dev libvulkan-dev meson \
+            nasm ninja-build patchelf pkg-config python3 xz-utils
+
+      - name: Install macOS build dependencies
+        if: startsWith(inputs.target, 'darwin-')
+        run: |
+          if [ -d /Applications/Xcode.app ]; then
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+          xcodebuild -version
+          xcrun -find swiftc
+          swiftc --version
+          brew install fontconfig freetype fribidi harfbuzz libass libunibreak \
+            meson ninja pkg-config gnu-tar nasm molten-vk vulkan-headers \
+            vulkan-loader
+
+      - name: Resolve cache key
+        id: cache
+        shell: bash
+        run: |
+          KEY="runtime-${{ inputs.target }}-$(node -e "
+            const c=require('crypto'),f=require('fs');
+            const h=c.createHash('sha256');
+            for (const p of [
+              'build/unix/build.sh',
+              'scripts/build-unix.mjs',
+              'versions.lock.json',
+            ]) h.update(f.readFileSync(p));
+            process.stdout.write(h.digest('hex').slice(0,20));
+          ")"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "cache key: $KEY"
+
+      - name: Restore build cache
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .build/${{ inputs.target }}
+          key: ${{ steps.cache.outputs.key }}
+          restore-keys: |
+            runtime-${{ inputs.target }}-
+
+      - name: Build Unix runtime
+        env:
+          MAKEJOBS: ${{ runner.os == 'macOS' && '3' || '4' }}
+        run: npm run build:unix -- ${{ inputs.target }}
+
+      - name: Report cache size
+        if: always()
+        shell: bash
+        run: du -sh .build/${{ inputs.target }} 2>/dev/null || true
+
+      - name: Save build cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .build/${{ inputs.target }}
+          key: ${{ steps.cache.outputs.key }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.target }}
+          path: |
+            artifacts/mpv-libre-runtime-${{ inputs.target }}.tar.xz
+            artifacts/mpv-libre-runtime-${{ inputs.target }}.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    needs: build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ inputs.target }}
+          path: artifacts
+      - name: Extract runtime
+        run: |
+          mkdir runtime
+          tar -xJf artifacts/mpv-libre-runtime-${{ inputs.target }}.tar.xz -C runtime
+          find runtime -maxdepth 3 -type f | sort | head -n 40
+      - name: Fetch verified AC-4 input
+        run: node scripts/fetch-ac4-fixture.mjs
+      - name: Verify libmpv and AC-4
+        run: bash scripts/verify-unix-runtime.sh runtime tmp/fixtures/ac4-smoke.mp4

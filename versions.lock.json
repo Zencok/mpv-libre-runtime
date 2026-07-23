@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "sources": {
+    "builder": {
+      "repository": "https://github.com/rorgoroth/mingw-cmake-env.git",
+      "commit": "b26fd7edea2a430e31ff019f6f9bc14dc3a63955",
+      "autoUpdate": false
+    },
+    "mpv": {
+      "repository": "https://github.com/mpv-player/mpv.git",
+      "commit": "94335ab87ab225ca3e36e0faeac831639d3e1d4e",
+      "autoUpdate": true
+    },
+    "librempeg": {
+      "repository": "https://github.com/librempeg/librempeg.git",
+      "commit": "2582d0d180d74ffc742f437e010e8c3c1017e437",
+      "autoUpdate": true
+    },
+    "libplacebo": {
+      "repository": "https://github.com/haasn/libplacebo.git",
+      "commit": "a7a18af88ff0a17c04840dcb3246047bb6b46df3",
+      "autoUpdate": true
+    }
+  },
+  "targets": {
+    "win32-x64": {
+      "status": "verified",
+      "artifact": "mpv-libre-runtime-win32-x64.7z"
+    },
+    "darwin-arm64": {
+      "status": "verified",
+      "artifact": "mpv-libre-runtime-darwin-arm64.tar.xz"
+    },
+    "darwin-x64": {
+      "status": "verified",
+      "artifact": "mpv-libre-runtime-darwin-x64.tar.xz"
+    },
+    "linux-x64": {
+      "status": "verified",
+      "artifact": "mpv-libre-runtime-linux-x64.tar.xz"
+    },
+    "linux-arm64": {
+      "status": "verified",
+      "artifact": "mpv-libre-runtime-linux-arm64.tar.xz"
+    }
+  }
+}

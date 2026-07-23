@@ -1,0 +1,77 @@
+# Self-contained multi-stage MinGW deps image (no external tools image required).
+# Avoids Buildx "cannot see docker-load'ed base" by baking tools in the same graph.
+#
+# Tag: ghcr.io/<owner>/mpv-libre-mingw-deps:<builder12>-<profile16>
+
+# ── Stage 1: toolchain base (mirrors Dockerfile) ─────────────────────────────
+FROM alpine:3.22 AS tools
+
+RUN apk add --no-cache 7zip autoconf automake bash ccache clang cmake coreutils \
+        curl diffutils g++ gawk gcc gettext-dev git gperf libtool lld llvm \
+        llvm-linker-tools make meson musl-dev nasm patch pkgconf po4a py3-pip \
+        py3-jinja2 py3-mako samurai tar texinfo util-linux-misc xz yasm \
+    && python3 -m pip install --break-system-packages --no-cache-dir meson==1.11.2 \
+    && git config --global http.version HTTP/1.1 \
+    && git config --global user.email "mpv-libre-runtime@example.invalid" \
+    && git config --global user.name "MpvLibre Runtime build" \
+    && mkdir -p /ccache /build \
+    && printf '%s\n' \
+        'max_size = 2.0G' \
+        'compression = true' \
+        'compiler_check = content' \
+        'hash_dir = false' \
+        > /etc/ccache.conf
+
+ENV CCACHE_DIR=/ccache \
+    CCACHE_CONFIGPATH=/etc/ccache.conf \
+    PATH="/usr/lib/ccache/bin:${PATH}"
+
+# ── Stage 2: compile MinGW deps into /build ──────────────────────────────────
+FROM tools AS deps-build
+
+ARG BUILDER_REPOSITORY
+ARG BUILDER_COMMIT
+ARG MAKEJOBS=4
+
+# Placeholder pins so cmake configure succeeds; deps mode never builds these.
+ARG MPV_REPOSITORY=https://github.com/mpv-player/mpv.git
+ARG MPV_COMMIT=0000000000000000000000000000000000000001
+ARG LIBREMPEG_REPOSITORY=https://github.com/librempeg/librempeg.git
+ARG LIBREMPEG_COMMIT=0000000000000000000000000000000000000001
+ARG RUNTIME_VERSION=deps-image
+
+ENV BUILDER_REPOSITORY=${BUILDER_REPOSITORY} \
+    BUILDER_COMMIT=${BUILDER_COMMIT} \
+    MPV_REPOSITORY=${MPV_REPOSITORY} \
+    MPV_COMMIT=${MPV_COMMIT} \
+    LIBREMPEG_REPOSITORY=${LIBREMPEG_REPOSITORY} \
+    LIBREMPEG_COMMIT=${LIBREMPEG_COMMIT} \
+    RUNTIME_VERSION=${RUNTIME_VERSION} \
+    MAKEJOBS=${MAKEJOBS} \
+    BUILD_MODE=deps \
+    CREATE_SOURCE_BUNDLE=0 \
+    CCACHE_DIR=/ccache
+
+WORKDIR /workspace
+COPY packages /workspace/build/windows-x64/packages
+COPY build.sh /workspace/build/windows-x64/build.sh
+COPY collect-sources.sh /workspace/build/windows-x64/collect-sources.sh
+RUN mkdir -p /workspace/artifacts \
+    && printf 'MpvLibre Runtime deps image\n' > /workspace/NOTICE.md \
+    && chmod +x /workspace/build/windows-x64/build.sh \
+    && sh /workspace/build/windows-x64/build.sh \
+    && ccache --show-stats || true \
+    && rm -rf /workspace /tmp/* /var/tmp/* \
+    && du -sh /build /ccache 2>/dev/null || true
+
+# ── Stage 3: slim runtime base + /build payload ──────────────────────────────
+FROM tools
+
+ENV CCACHE_DIR=/ccache \
+    BUILD_MODE=runtime
+
+COPY --from=deps-build /build /build
+COPY --from=deps-build /ccache /ccache
+
+LABEL org.opencontainers.image.source="https://github.com/Zencok/mpv-libre-runtime" \
+      org.opencontainers.image.description="Prebuilt MinGW deps for MpvLibre Runtime Windows builds"

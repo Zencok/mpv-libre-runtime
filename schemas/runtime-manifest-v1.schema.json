@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Zencok/mpv-libre-runtime/raw/main/schemas/runtime-manifest-v1.schema.json",
+  "title": "MpvLibre Runtime release manifest",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "release",
+    "engine",
+    "mediaBackend",
+    "sources",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "release": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["unix", "complete", "auto"],
+      "description": "Staged publish phase that produced this manifest"
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "True when every target declared in versions.lock.json is present"
+    },
+    "engine": {
+      "const": "libmpv"
+    },
+    "mediaBackend": {
+      "const": "librempeg"
+    },
+    "license": {
+      "const": "AGPL-3.0-or-later"
+    },
+    "sources": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["url", "sha256", "size"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "enum": ["verified", "experimental"]
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
