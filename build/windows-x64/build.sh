@@ -125,9 +125,18 @@ load_deps_targets() {
 
 configure_tree() {
     log "cmake configure (${BUILD_MODE}) jobs=${MAKEJOBS}"
-    cmake -S "${SOURCE_ROOT}" -B "${BUILD_ROOT}" -G Ninja \
+    # Runtime seals prebuilt dep steps after configure. Allowing Ninja to
+    # re-run CMake mid-build would regenerate those scripts and undo the seal.
+    set -- \
+        -S "${SOURCE_ROOT}" \
+        -B "${BUILD_ROOT}" \
+        -G Ninja \
         -DCPUTUNE=x86-64 \
         -DMAKEJOBS="${MAKEJOBS}"
+    if [ "${BUILD_MODE}" = "runtime" ]; then
+        set -- "$@" -DCMAKE_SUPPRESS_REGENERATION=ON
+    fi
+    cmake "$@"
 }
 
 fix_harfbuzz_if_needed() {
@@ -171,26 +180,125 @@ invalidate_runtime_packages() {
         "${BUILD_ROOT}/packages/mpv-runtime"
 }
 
+# After cmake reconfigure, Ninja re-runs ExternalProject steps for deps because
+# stamp inputs (e.g. *-gitinfo.txt) are regenerated. The deps image already has
+# those packages installed under MINGW_INSTALL_PREFIX; re-running is wrong and
+# fails hard on slimmed trees (no .git → libzimg `git clean` / force-update die).
+#
+# Seal strategy (must survive until cmake --build):
+#  1. Rewrite dep ExternalProject step scripts to no-ops.
+#  2. Patch build.ninja COMMAND lines for dep packages to `cmake -E true`
+#     (script no-ops alone are not enough if Ninja still invokes real rules).
+#  3. Refresh stamp files / *-complete markers.
+seal_prebuilt_deps() {
+    log "sealing prebuilt dependency ExternalProject steps (runtime)"
+    sealed=0
+    noop_cmake="${BUILD_ROOT}/mpv-libre-seal-noop.cmake"
+    printf '%s\n' \
+        'cmake_minimum_required(VERSION 3.16)' \
+        '# sealed: prebuilt MinGW dep — skip ExternalProject step' \
+        > "${noop_cmake}"
+
+    for prefix in "${BUILD_ROOT}/packages"/*-prefix; do
+        [ -d "${prefix}" ] || continue
+        pkg=$(basename "${prefix}" -prefix)
+        case "${pkg}" in
+            librempeg|mpv|mpv-runtime) continue ;;
+        esac
+
+        # No-op step scripts (cmake -P drivers).
+        find "${prefix}" -type f -name '*.cmake' 2>/dev/null \
+            | while read -r script; do
+                case "${script}" in
+                    *gitinfo*|*patch-info*|*update-info*) continue ;;
+                esac
+                if grep -q 'execute_process' "${script}" 2>/dev/null; then
+                    cp "${noop_cmake}" "${script}"
+                fi
+            done
+
+        find "${prefix}" -type d -name '*-stamp' 2>/dev/null \
+            | while read -r stamp_dir; do
+                stamp_pkg=$(basename "${stamp_dir}" | sed 's/-stamp$//')
+                for step in mkdir download update patch configure build install done \
+                    force-update force-meson-configure force-git-patch; do
+                    touch "${stamp_dir}/${stamp_pkg}-${step}" 2>/dev/null || true
+                    touch "${stamp_dir}/${stamp_pkg}-${step}-" 2>/dev/null || true
+                done
+                find "${stamp_dir}" -type f -exec touch {} + 2>/dev/null || true
+            done
+
+        mkdir -p "${BUILD_ROOT}/packages/CMakeFiles"
+        touch "${BUILD_ROOT}/packages/CMakeFiles/${pkg}-complete" 2>/dev/null || true
+        sealed=$((sealed + 1))
+    done
+
+    # Rewrite Ninja COMMANDs for every non-runtime package prefix. This is the
+    # hard guarantee: even if a step is dirty, it becomes a no-op edge.
+    if [ -f "${BUILD_ROOT}/build.ninja" ]; then
+        log "patching build.ninja commands for prebuilt deps"
+        # BusyBox awk: blank COMMAND lines that reference a sealed package path.
+        # Keep librempeg/mpv/mpv-runtime commands intact.
+        awk '
+            BEGIN { skip = 0 }
+            /^[[:space:]]*COMMAND = / {
+                line = $0
+                if (line ~ /packages\/librempeg-prefix/ \
+                    || line ~ /packages\/mpv-prefix/ \
+                    || line ~ /packages\/mpv-runtime/ \
+                    || line ~ /packages\/CMakeFiles\/librempeg/ \
+                    || line ~ /packages\/CMakeFiles\/mpv[^-]/) {
+                    print
+                    next
+                }
+                if (line ~ /packages\/[A-Za-z0-9_.+-]+-prefix/ \
+                    || line ~ /packages\/CMakeFiles\/[A-Za-z0-9_.+-]+-complete/) {
+                    sub(/COMMAND = .*/, "COMMAND = /usr/bin/cmake -E true")
+                    print
+                    next
+                }
+                print
+                next
+            }
+            { print }
+        ' "${BUILD_ROOT}/build.ninja" > "${BUILD_ROOT}/build.ninja.sealed"
+        mv "${BUILD_ROOT}/build.ninja.sealed" "${BUILD_ROOT}/build.ninja"
+    fi
+
+    # Sanity: a known dep install driver must be a no-op after sealing.
+    sample=$(find "${BUILD_ROOT}/packages" -path '*/libzimg-stamp/*install*impl.cmake' 2>/dev/null | head -n1 || true)
+    if [ -n "${sample}" ] && ! grep -q 'sealed: prebuilt' "${sample}" 2>/dev/null; then
+        echo "seal_prebuilt_deps failed: ${sample} was not no-op'd" >&2
+        exit 1
+    fi
+    log "sealed ${sealed} prebuilt dependency package(s)"
+}
+
 slim_deps_tree() {
     log "slimming /build for image payload"
-    # Drop VCS metadata everywhere under /build.
-    find /build -type d -name .git 2>/dev/null | while read -r gitdir; do
-        rm -rf "${gitdir}"
-    done
+    # Keep .git and object archives: runtime reconfigure + force_rebuild_git /
+    # libzimg INSTALL_COMMAND (`git clean`) need a recoverable tree if a dep
+    # edge is ever re-run. Installed prefixes under install/ stay intact.
+
     # Drop package download caches only (do NOT delete installed *.exe tools).
     find "${BUILD_ROOT}" -type d \( \
         -name download -o -name downloads -o -name '.cache' -o -name tmp \
     \) 2>/dev/null | while read -r d; do
+        # Preserve ExternalProject tmp/ scripts used by mkdir steps.
+        case "${d}" in
+            */packages/*/tmp) continue ;;
+        esac
         rm -rf "${d}"
     done
     find "${BUILD_ROOT}" -type f \( \
         -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o \
         -name '*.tar.xz' -o -name '*.tar.bz2' -o -name '*.zip' -o -name '*.7z' \
     \) -delete 2>/dev/null || true
-    # Intermediate objects only under package build dirs (keep install prefixes intact).
+    # Drop bulky intermediate objects but keep static libs (.a) and libtool
+    # outputs needed for a re-install edge.
     find "${BUILD_ROOT}/packages" -type d \( -name '*-build' -o -name 'src' \) 2>/dev/null \
         | while read -r d; do
-            find "${d}" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.lo' -o -name '*.a' \) \
+            find "${d}" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.lo' \) \
                 ! -path '*/install/*' -delete 2>/dev/null || true
         done
     find "${BUILD_ROOT}" -type f \( -name 'CMakeOutput.log' -o -name 'CMakeError.log' \) \
@@ -202,11 +310,30 @@ slim_deps_tree() {
     du -sh /build "${CCACHE_DIR}" 2>/dev/null || true
 }
 
+dump_ep_failure_logs() {
+    log "dumping recent ExternalProject failure logs (if any)"
+    find "${BUILD_ROOT}/packages" -type f \( \
+        -name '*-err.log' -o -name '*-out.log' \
+    \) -size +0 2>/dev/null \
+        | sort \
+        | tail -n 40 \
+        | while read -r f; do
+            printf '---- %s ----\n' "${f}"
+            tail -n 40 "${f}" 2>/dev/null || true
+        done
+}
+
 build_runtime_packages() {
+    # Caller is responsible for invalidate + reconfigure + seal in runtime mode.
     log "building librempeg + mpv"
-    invalidate_runtime_packages
-    cmake --build "${BUILD_ROOT}" --target librempeg --parallel "${MAKEJOBS}"
-    cmake --build "${BUILD_ROOT}" --target mpv --parallel "${MAKEJOBS}"
+    if ! cmake --build "${BUILD_ROOT}" --target librempeg --parallel "${MAKEJOBS}"; then
+        dump_ep_failure_logs
+        return 1
+    fi
+    if ! cmake --build "${BUILD_ROOT}" --target mpv --parallel "${MAKEJOBS}"; then
+        dump_ep_failure_logs
+        return 1
+    fi
 }
 
 package_runtime() {
@@ -277,13 +404,23 @@ case "${BUILD_MODE}" in
         log "deps image payload ready under /build"
         ;;
     runtime)
-        # llvm + deps install prefixes come from the GHCR image; only rebuild runtime pkgs.
+        # 1) First configure above picks real MPV/LIBREMPEG pins but dirties deps.
+        # 2) Seal dep ExternalProject scripts (no-op) so Ninja won't rebuild them.
+        # 3) Drop librempeg/mpv trees so they rebuild from the new pins.
+        # 4) Reconfigure recreates librempeg/mpv EP metadata (cfgcmd/stamps);
+        #    that would also un-seal deps, so seal again.
+        # 5) Build only librempeg + mpv against the preinstalled MinGW prefix.
+        seal_prebuilt_deps
+        invalidate_runtime_packages
+        configure_tree
+        seal_prebuilt_deps
         build_runtime_packages
         package_runtime
         ;;
     full)
         build_llvm
         build_deps
+        invalidate_runtime_packages
         build_runtime_packages
         package_runtime
         ;;

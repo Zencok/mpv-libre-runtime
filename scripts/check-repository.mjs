@@ -163,6 +163,14 @@ assert(windowsBuild.includes("vendored mingw-cmake-env"),
     "runtime must accept vendored builder tree without re-cloning");
 assert(windowsBuild.includes("Always reconfigure"),
     "runtime must reconfigure so ExternalProject picks real MPV/LIBREMPEG pins");
+assert(windowsBuild.includes("seal_prebuilt_deps"),
+    "runtime must seal prebuilt dep ExternalProject steps after reconfigure");
+assert(windowsBuild.includes("build.ninja.sealed") || windowsBuild.includes("patching build.ninja"),
+    "runtime seal must patch build.ninja dep COMMANDs to no-ops");
+assert(windowsBuild.includes("CMAKE_SUPPRESS_REGENERATION"),
+    "runtime configure must suppress CMake regeneration so seals stick");
+assert(windowsBuild.includes("Keep .git"),
+    "slim_deps_tree must document keeping .git for force_rebuild_git / libzimg");
 
 const windowsOrchestrator = fs.readFileSync(
     path.join(root, "scripts", "build-windows-x64.mjs"),
