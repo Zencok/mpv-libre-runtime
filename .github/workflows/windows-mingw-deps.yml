@@ -67,7 +67,11 @@ jobs:
             echo "Image missing, will build: $IMAGE"
           fi
 
+      # Image push is the source of truth; GHA layer cache is best-effort only.
+      # Large MinGW graphs have hit `cache-to type=gha` → not_found after a
+      # successful GHCR push, which previously failed the whole job.
       - name: Build and push deps image
+        id: push
         if: steps.remote.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -84,10 +88,24 @@ jobs:
             MPV_COMMIT=0000000000000000000000000000000000000001
             LIBREMPEG_COMMIT=0000000000000000000000000000000000000001
           cache-from: type=gha,scope=win-mingw-deps
-          cache-to: type=gha,mode=max,scope=win-mingw-deps
+          cache-to: type=gha,mode=min,scope=win-mingw-deps,ignore-error=true
+
+      - name: Confirm deps image is pullable
+        if: steps.remote.outputs.exists != 'true'
+        shell: bash
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          # Fail the job only when the registry image is missing — not when
+          # Buildx GHA cache export flakes after a successful push.
+          if ! docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "Deps image missing after build/push: $IMAGE" >&2
+            exit 1
+          fi
+          echo "Confirmed published: $IMAGE"
 
       - name: Make package public (best effort)
-        if: steps.remote.outputs.exists != 'true'
+        # Also runs when the image already existed (prior run may have pushed
+        # then failed on cache export before this step).
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
