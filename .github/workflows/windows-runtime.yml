@@ -16,6 +16,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Required by nested windows-mingw-deps (docker/build-push-action type=gha cache).
+      # Callers must also grant actions: write; GitHub rejects elevation otherwise.
+      actions: write
 
   build:
     needs: mingw-deps
