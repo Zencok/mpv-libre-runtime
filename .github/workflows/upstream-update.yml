@@ -2,7 +2,9 @@ name: Check upstream revisions
 
 on:
   schedule:
-    - cron: "23 4 * * 1"
+    # Daily. librempeg lands commits most days, so a weekly check left the
+    # pins more than a week behind upstream for most of their life.
+    - cron: "23 4 * * *"
   workflow_dispatch:
 
 permissions:
