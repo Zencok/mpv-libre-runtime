@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,5 +59,13 @@ if (process.env.GITHUB_OUTPUT) {
     fs.appendFileSync(
         process.env.GITHUB_OUTPUT,
         `summary=${changes.map((change) => `${change.name}-${change.to.slice(0, 10)}`).join("_")}\n`,
+    );
+    // Multi-line body for the automation commit message. The delimiter is
+    // random so a crafted upstream ref cannot terminate the block early and
+    // inject extra step outputs.
+    const delimiter = `EOF_${crypto.randomUUID()}`;
+    fs.appendFileSync(
+        process.env.GITHUB_OUTPUT,
+        `details<<${delimiter}\n${summary}\n${delimiter}\n`,
     );
 }

@@ -4,3 +4,7 @@ tmp/
 .cache/
 .DS_Store
 Thumbs.db
+
+# Local agent context (not part of the build)
+.ccg/
+.context/

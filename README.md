@@ -175,8 +175,12 @@ licenses.
 
 ## Release process
 
-1. A scheduled workflow proposes upstream pin updates via PR (`versions.lock.json`).
-2. CI builds and verifies every target.
+1. A scheduled workflow updates the upstream pins (`versions.lock.json`) and
+   commits them straight to `main`, then dispatches the release. There is no
+   intermediate pull request: the PR flow built and verified all five targets
+   and the merge then rebuilt the identical commits, doubling runner time for
+   every upstream bump.
+2. The release workflow builds and verifies every target.
 3. On `main`, releases are **staged on one immutable tag**:
    - **Unix first** — when linux/darwin jobs pass, the tag is created with Unix
      archives and a partial `runtime-manifest-v1.json` (`phase: unix`).

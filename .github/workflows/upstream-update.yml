@@ -7,7 +7,13 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  actions: write
+
+# Never let two updates race for main; a queued run picks up whatever the
+# previous one committed.
+concurrency:
+  group: upstream-update
+  cancel-in-progress: false
 
 jobs:
   update:
@@ -22,19 +28,50 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/update-upstreams.mjs
-      - run: npm run check
-      - name: Create tested update pull request
+      - name: Validate lockfile contract
+        run: npm run check
+
+      # Commit straight to main instead of opening a pull request. The PR flow
+      # built and verified all five targets, then the merge to main built and
+      # verified the exact same commits a second time — roughly two hours of
+      # runner time for one upstream bump.
+      - name: Commit pinned revisions
         if: steps.update.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
-        with:
-          branch: automation/upstream-runtime
-          delete-branch: true
-          commit-message: "build(deps): update mpv and LibreMPEG revisions"
-          title: "build(deps): update mpv and LibreMPEG revisions"
-          body: |
-            Automated upstream revision update.
+        env:
+          UPDATE_DETAILS: ${{ steps.update.outputs.details }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions.lock.json
+          git commit \
+            --message "build(deps): update pinned upstream revisions" \
+            --message "$UPDATE_DETAILS"
+          git push origin HEAD:main
 
-            The runtime CI must build the pinned commits and pass the Windows
-            libmpv/AC-4 verification before this change is merged.
-          labels: dependencies
+      # A push made with GITHUB_TOKEN does not start another workflow, so the
+      # release has to be dispatched explicitly. It checks out main, which now
+      # carries the commit pushed above.
+      - name: Dispatch runtime release
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref main
 
+      - name: Report result
+        env:
+          CHANGED: ${{ steps.update.outputs.changed }}
+          UPDATE_DETAILS: ${{ steps.update.outputs.details }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            {
+              echo "### Upstream revisions updated"
+              echo
+              echo '```'
+              echo "$UPDATE_DETAILS"
+              echo '```'
+              echo
+              echo "Pushed to \`main\` and dispatched **Publish runtime**."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No upstream changes." >> "$GITHUB_STEP_SUMMARY"
+          fi

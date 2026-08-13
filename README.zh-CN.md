@@ -169,9 +169,11 @@ CI 校验（全平台）：`ffmpeg -decoders` 含 AC-4、实际解码 fixture、
 
 ## 发布流程
 
-1. 定时 workflow 检查上游并打开更新 `versions.lock.json` 的 PR。
-2. CI 对全部目标构建并验证。
-3. 合并到 `main` 后，在**同一不可变 tag** 上分阶段发布：
+1. 定时 workflow 检查上游，更新 `versions.lock.json` 后直接提交到 `main`，
+   随后触发发布。不再走 PR：PR 会把五个目标完整构建校验一遍，合并后又对同样的
+   commit 重跑一遍，一次上游更新要烧掉双倍构建时间。
+2. 发布 workflow 对全部目标构建并验证。
+3. 在**同一不可变 tag** 上分阶段发布：
    - **Unix 先发** — linux/darwin 通过后立刻建 tag，上传 Unix 归档与阶段性
      `runtime-manifest-v1.json`（`phase: unix`）。
    - **Windows 后补** — win32 完成后（**不依赖 Unix 是否成功**）把产物与源码包挂
