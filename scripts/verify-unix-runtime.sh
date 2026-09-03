@@ -43,6 +43,19 @@ for forbidden in include libmpv.a libmpv.dll.a; do
     fi
 done
 
+if [ "$(uname -s)" = "Darwin" ]; then
+    log "verifying code signatures"
+    # A stale code signature kills Electron utility children (CS_KILL) even
+    # though plain dlopen probes tolerate it, so gate on codesign here.
+    for binary in "${RUNTIME_DIRECTORY}/ffmpeg" \
+                  "${RUNTIME_DIRECTORY}/ffprobe" \
+                  "${RUNTIME_DIRECTORY}"/lib/*.dylib; do
+        [ -e "${binary}" ] || fail "expected runtime binary is missing: ${binary}"
+        codesign --verify --strict "${binary}" \
+            || fail "invalid or missing code signature: ${binary}"
+    done
+fi
+
 log "checking LibreMPEG AC-4 decoder list"
 "${RUNTIME_DIRECTORY}/ffmpeg" -hide_banner -decoders 2>&1 \
     | grep -E '[[:space:]]ac4[[:space:]]' >/dev/null \

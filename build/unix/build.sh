@@ -230,6 +230,24 @@ ensure_linux_cxx_runtime() {
     test -e "${RUNTIME_ROOT}/lib/libgcc_s.so.1"
 }
 
+# install_name_tool only re-signs binaries that were linker-signed at build
+# time (a cctools rule). Homebrew bottles are ad-hoc signed with codesign
+# instead (flags=0x2), so rewriting their install names leaves stale page
+# hashes behind. Chromium-derived hosts (Electron utility processes) run with
+# CS_KILL|CS_HARD, and the kernel SIGKILLs such a child the moment an invalid
+# page is paged in. Every shipped darwin Mach-O therefore needs a fresh,
+# valid ad-hoc signature before the runtime is archived.
+sign_darwin_runtime() {
+    log "Re-signing darwin runtime binaries (ad-hoc)"
+    local target
+    for target in "${RUNTIME_ROOT}/ffmpeg" "${RUNTIME_ROOT}/ffprobe" \
+        "${RUNTIME_ROOT}"/lib/*; do
+        [ -f "${target}" ] || continue
+        codesign --force --sign - "${target}"
+        codesign --verify --strict "${target}"
+    done
+}
+
 is_system_darwin_lib() {
     case "$1" in
         /System/*|/usr/lib/*|/usr/lib/*/*)
@@ -506,6 +524,7 @@ if [ "${is_darwin}" -eq 1 ]; then
     fi
     test -e "${RUNTIME_ROOT}/lib/libmpv.2.dylib"
     copy_darwin_runtime_dependencies "${RUNTIME_ROOT}/lib/libmpv.2.dylib"
+    sign_darwin_runtime
 else
     cp -a "${PREFIX}"/lib/libmpv.so* "${RUNTIME_ROOT}/lib/"
     test -e "${RUNTIME_ROOT}/lib/libmpv.so.2"
