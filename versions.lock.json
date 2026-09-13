@@ -8,12 +8,12 @@
     },
     "mpv": {
       "repository": "https://github.com/mpv-player/mpv.git",
-      "commit": "14f2d48cbc7dda61adb4bd181e107a1f3f76e533",
+      "commit": "10dee0a039c7ff59c38fc1bd620837b861ed9b72",
       "autoUpdate": true
     },
     "librempeg": {
       "repository": "https://github.com/librempeg/librempeg.git",
-      "commit": "fd17535d375048a067de07774728ee08b3bf75af",
+      "commit": "2de4460308c5cdef030386afdbdc0d8eb9bde322",
       "autoUpdate": true
     },
     "libplacebo": {
