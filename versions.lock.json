@@ -13,7 +13,7 @@
     },
     "librempeg": {
       "repository": "https://github.com/librempeg/librempeg.git",
-      "commit": "fc8517836c27daade9e56a740ba9ca1a71e2c44b",
+      "commit": "fa3f2a16448bdc221628e618cebe77a3ba640c2b",
       "autoUpdate": true
     },
     "libplacebo": {
