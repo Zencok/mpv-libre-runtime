@@ -18,7 +18,7 @@
     },
     "libplacebo": {
       "repository": "https://github.com/haasn/libplacebo.git",
-      "commit": "c42968d8616a1d1c8ad5f4f1a8d6f5a9cb396e56",
+      "commit": "1937beef3a2f508266c68efea1491e3fc4600e04",
       "autoUpdate": true
     }
   },
