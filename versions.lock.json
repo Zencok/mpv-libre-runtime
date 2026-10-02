@@ -13,12 +13,12 @@
     },
     "librempeg": {
       "repository": "https://github.com/librempeg/librempeg.git",
-      "commit": "8e8b221e207f685119fcfe276ae28c94ff6f5aa0",
+      "commit": "925365e5f70630032b93c9630ed8390e0def484b",
       "autoUpdate": true
     },
     "libplacebo": {
       "repository": "https://github.com/haasn/libplacebo.git",
-      "commit": "1937beef3a2f508266c68efea1491e3fc4600e04",
+      "commit": "92b5ac6db79f4d680eb656692f7bf51e9606f42a",
       "autoUpdate": true
     }
   },
