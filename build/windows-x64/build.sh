@@ -311,15 +311,15 @@ slim_deps_tree() {
 }
 
 dump_ep_failure_logs() {
-    log "dumping recent ExternalProject failure logs (if any)"
-    find "${BUILD_ROOT}/packages" -type f \( \
-        -name '*-err.log' -o -name '*-out.log' \
+    local package_name=$1
+    log "dumping ${package_name} ExternalProject failure logs (if any)"
+    find "${BUILD_ROOT}/packages/${package_name}-prefix" -type f \( \
+        -name '*-err.log' -o -name '*-out.log' -o -name 'meson-log.txt' \
     \) -size +0 2>/dev/null \
         | sort \
-        | tail -n 40 \
         | while read -r f; do
-            printf '---- %s ----\n' "${f}"
-            tail -n 40 "${f}" 2>/dev/null || true
+            printf '%s\n' "---- ${f} ----"
+            tail -n 100 "${f}" 2>/dev/null || true
         done
 }
 
@@ -327,11 +327,11 @@ build_runtime_packages() {
     # Caller is responsible for invalidate + reconfigure + seal in runtime mode.
     log "building librempeg + mpv"
     if ! cmake --build "${BUILD_ROOT}" --target librempeg --parallel "${MAKEJOBS}"; then
-        dump_ep_failure_logs
+        dump_ep_failure_logs librempeg
         return 1
     fi
     if ! cmake --build "${BUILD_ROOT}" --target mpv --parallel "${MAKEJOBS}"; then
-        dump_ep_failure_logs
+        dump_ep_failure_logs mpv
         return 1
     fi
 }

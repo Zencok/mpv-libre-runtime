@@ -16,7 +16,6 @@
     "build:windows-x64:full": "node scripts/build-windows-x64.mjs --full",
     "windows:deps-image-name": "node scripts/windows-deps-image.mjs",
     "check": "node scripts/check-repository.mjs",
-    "check:upstream": "node scripts/update-upstreams.mjs",
     "manifest": "node scripts/create-release-manifest.mjs"
   }
 }

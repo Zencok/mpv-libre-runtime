@@ -1,19 +1,6 @@
 name: Publish runtime
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - versions.lock.json
-      - build/**
-      - scripts/**
-      - fixtures/**
-      - NOTICE.md
-      - schemas/**
-      - .github/workflows/release.yml
-      - .github/workflows/unix-runtime.yml
-      - .github/workflows/windows-runtime.yml
-      - .github/workflows/windows-mingw-deps.yml
   workflow_dispatch:
 
 permissions:

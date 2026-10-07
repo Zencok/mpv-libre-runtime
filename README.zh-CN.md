@@ -169,10 +169,11 @@ CI 校验（全平台）：`ffmpeg -decoders` 含 AC-4、实际解码 fixture、
 
 ## 发布流程
 
-1. 定时 workflow 检查上游，更新 `versions.lock.json` 后直接提交到 `main`，
-   随后触发发布。不再走 PR：PR 会把五个目标完整构建校验一遍，合并后又对同样的
-   commit 重跑一遍，一次上游更新要烧掉双倍构建时间。
-2. 发布 workflow 对全部目标构建并验证。
+1. 已关闭上游自动更新、定时检查、自动 PR、PR 触发的 CI 和 push 触发的发布。
+   所有源码 pin 均使用 `autoUpdate: false`；需要升级时手动修改 `versions.lock.json`。
+2. CI 与发布定义仅保留手动触发（`workflow_dispatch`）。GitHub 上的 Runtime CI
+   和 Publish runtime 也已停用；确需运行时先有意重新启用对应 workflow，
+   再手动触发。手动发布仍对全部目标构建并验证。
 3. 在**同一不可变 tag** 上分阶段发布：
    - **Unix 先发** — linux/darwin 通过后立刻建 tag，上传 Unix 归档与阶段性
      `runtime-manifest-v1.json`（`phase: unix`）。
@@ -182,6 +183,19 @@ CI 校验（全平台）：`ffmpeg -decoders` 含 AC-4、实际解码 fixture、
    `complete: true`（或 win32 资产出现）后再升级。
 
 上游 pin 不会在消费方应用内被静默替换。
+
+### LibreMPEG 兼容性锁定
+
+LibreMPEG 暂时锁定到 2026 年 9 月 24 日五平台成功发布所使用的
+`9c00336e26e45ed1274c9693382b1b1441ccaf6a`，并关闭自动更新；mpv、
+libplacebo 与 builder 的自动更新也全部关闭。
+
+9 月 25 日的 LibreMPEG 修订删除了 mpv 仍必需的 `libswresample`。新版
+LibreMPEG 同时报告 libavutil >= 61.7.100，却没有 `AV_SAMPLE_FMT_DSD`，
+触发 mpv 不兼容的 DST/DoP 代码路径。缓存安装前缀可能掩盖重采样库缺失，
+使构建直到编译阶段才失败。手动修改 LibreMPEG pin 前，需要解决这两项兼容
+问题并通过五平台干净构建和运行时校验；自动更新保持关闭。届时同步调整
+`scripts/check-repository.mjs` 中的兼容性断言。
 
 ## 可复现性
 

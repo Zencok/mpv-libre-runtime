@@ -17,7 +17,8 @@ function assert(condition, message) {
 
 function collectFiles() {
     const result = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" });
-    return result.split("\0").filter(Boolean).map((relativePath) => path.join(root, relativePath));
+    return result.split("\0").filter(Boolean).map((relativePath) => path.join(root, relativePath))
+        .filter((filePath) => fs.existsSync(filePath));
 }
 
 const lock = readJson("versions.lock.json");
@@ -26,7 +27,12 @@ for (const [name, source] of Object.entries(lock.sources)) {
     assert(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(source.repository),
         `${name} repository must be an HTTPS GitHub URL`);
     assert(/^[a-f0-9]{40}$/.test(source.commit), `${name} must use a full commit SHA`);
+    assert(source.autoUpdate === false, `${name} automatic updates must stay disabled`);
 }
+assert(lock.sources.librempeg.autoUpdate === false,
+    "LibreMPEG updates must stay paused until mpv supports the removal of libswresample and its DSD API differences");
+assert(lock.sources.librempeg.commit === "9c00336e26e45ed1274c9693382b1b1441ccaf6a",
+    "LibreMPEG must use the last verified compatible revision; update the compatibility policy before changing this pin");
 for (const target of ["win32-x64", "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]) {
     assert(lock.targets[target]?.status === "verified", `${target} must be verified`);
     assert(lock.targets[target]?.artifact, `${target} must declare an artifact`);
@@ -35,7 +41,22 @@ assert(fs.existsSync(path.join(root, "build", "unix", "build.sh")),
     "Unix build entry is missing");
 
 readJson("schemas/runtime-manifest-v1.schema.json");
-readJson("package.json");
+const packageMetadata = readJson("package.json");
+assert(!packageMetadata.scripts["check:upstream"], "Automatic upstream checker must stay removed");
+assert(!fs.existsSync(path.join(root, "scripts", "update-upstreams.mjs")),
+    "Automatic upstream updater must stay removed");
+assert(!fs.existsSync(path.join(root, ".github", "workflows", "upstream-update.yml")),
+    "Automatic upstream workflow must stay removed");
+const workflowsRoot = path.join(root, ".github", "workflows");
+for (const filename of fs.readdirSync(workflowsRoot).filter((name) => /\.ya?ml$/.test(name))) {
+    const workflow = fs.readFileSync(path.join(workflowsRoot, filename), "utf8");
+    const events = workflow.match(/^on:\r?\n((?:[ \t].*\r?\n|\r?\n)*)/m)?.[1] ?? "";
+    const eventNames = [...events.matchAll(/^ {2}([a-z_]+):/gm)].map((match) => match[1]);
+    assert(eventNames.length > 0 && eventNames.every((name) =>
+        name === "workflow_dispatch" || name === "workflow_call"),
+    `${filename} must only allow manual or reusable workflow triggers`);
+    assert(!workflow.includes("create-pull-request"), `${filename} must not create automatic pull requests`);
+}
 
 const fixture = readJson("fixtures/ac4-smoke.json");
 assert(
@@ -171,6 +192,9 @@ assert(windowsBuild.includes("CMAKE_SUPPRESS_REGENERATION"),
     "runtime configure must suppress CMake regeneration so seals stick");
 assert(windowsBuild.includes("Keep .git"),
     "slim_deps_tree must document keeping .git for force_rebuild_git / libzimg");
+assert(windowsBuild.includes("dump_ep_failure_logs librempeg")
+    && windowsBuild.includes("dump_ep_failure_logs mpv"),
+    "ExternalProject failure diagnostics must select the failed package instead of truncating all package logs");
 
 const windowsOrchestrator = fs.readFileSync(
     path.join(root, "scripts", "build-windows-x64.mjs"),

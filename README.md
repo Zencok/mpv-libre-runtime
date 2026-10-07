@@ -175,12 +175,13 @@ licenses.
 
 ## Release process
 
-1. A scheduled workflow updates the upstream pins (`versions.lock.json`) and
-   commits them straight to `main`, then dispatches the release. There is no
-   intermediate pull request: the PR flow built and verified all five targets
-   and the merge then rebuilt the identical commits, doubling runner time for
-   every upstream bump.
-2. The release workflow builds and verifies every target.
+1. Automatic upstream updates, scheduled checks, automatic pull requests,
+   PR-triggered CI, and push-triggered releases are disabled. All source pins
+   use `autoUpdate: false`; update `versions.lock.json` manually when needed.
+2. CI and release definitions are manual-only (`workflow_dispatch`). GitHub
+   has also disabled Runtime CI and Publish runtime; deliberately re-enable
+   the desired workflow before dispatching it. Manual releases build and
+   verify every target.
 3. On `main`, releases are **staged on one immutable tag**:
    - **Unix first** — when linux/darwin jobs pass, the tag is created with Unix
      archives and a partial `runtime-manifest-v1.json` (`phase: unix`).
@@ -193,6 +194,21 @@ licenses.
    (or until the win32 asset appears).
 
 Upstream pins are never silently swapped inside downstream apps.
+
+### LibreMPEG compatibility hold
+
+LibreMPEG is pinned to `9c00336e26e45ed1274c9693382b1b1441ccaf6a`, used by
+the successful five-platform release on September 24, 2026. Its automatic
+updates are disabled, as are those for mpv, libplacebo, and the builder.
+
+The September 25 LibreMPEG revision removed `libswresample`, which mpv still
+requires. Newer LibreMPEG also reports libavutil >= 61.7.100 without providing
+`AV_SAMPLE_FMT_DSD`, activating mpv's incompatible DST/DoP code path. Cached
+prefixes can hide the missing resampler and fail later during compilation.
+Before manually changing the pinned LibreMPEG revision, address both
+incompatibilities and pass a clean build and runtime verification on all
+five targets. Automatic updates remain disabled. Update the
+compatibility assertions in `scripts/check-repository.mjs` at the same time.
 
 ## Reproducibility
 
